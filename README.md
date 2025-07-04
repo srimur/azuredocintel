@@ -42,3 +42,13 @@ Now respond only with valid JSON in this format:
 """
 ```
 
+```
+{
+  "user_id": "u123",
+  "timestamp": "2025-07-04T12:00Z",
+  "recommendations": ["Use wired network", "Replace headset model XYZ"],
+  "context_summary": { ... }
+}
+
+```
+
