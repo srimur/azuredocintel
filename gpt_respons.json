@@ -1,0 +1,27 @@
+{
+  "user_id": "6d9c4cf7-4c29-41d7-b0e1-5c901e3548dc",
+  "timestamp": "2025-07-04T12:00:00Z",
+  "technical_analysis": {
+    "bad_call_count": 6,
+    "common_issues": {
+      "wifi_signal_strength": "Average: 42 dBm — weak signal in 5/6 bad calls",
+      "link_speed": "Below 20 Mbps in 4/6 bad calls",
+      "mic_glitch_rate": "Above 0.3 in 3/6 bad calls",
+      "headset_model": "Logitech X120 used in 5/6 bad calls"
+    },
+    "subnet_flag": "10.0.5.0/24 had 8 bad calls across all users in the last day (via AI Search)",
+    "headset_flag": "Logitech X120 appears in 12 bad calls across 25 recent users (via AI Search)",
+    "device_glitch_ratio_trend": "Increasing from 0.1 → 0.4 over last 3 calls",
+    "packet_loss_avg": "3.8%",
+    "jitter_avg": "65 ms"
+  },
+  "actionable_notification": {
+    "summary": "6 out of your last 10 Teams calls had poor quality.",
+    "recommendations": [
+      "Try switching from Wi-Fi to a wired connection (signal strength low).",
+      "Consider replacing headset model 'Logitech X120' — involved in many bad calls.",
+      "Check your network setup on subnet '10.0.5.0/24' — common issue across users.",
+      "Try restarting your device — audio glitch ratio increasing recently."
+    ]
+  }
+}
