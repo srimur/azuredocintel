@@ -1,0 +1,5 @@
+gpt_response = {
+    "organizer_user_id": "6d9c4cf7-4c29-41d7-b0e1-5c901e3548dc",
+    "technical_analysis": { ... },
+    "actionable_notification": { ... }
+}
