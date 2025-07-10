@@ -1,17 +1,8 @@
-from azure.identity import AzureCliCredential
-from azure.search.documents import SearchClient
-import os
-import json
+from azure.identity import DefaultAzureCredential
 
-# Setup
-endpoint = os.getenv("AZURE_SEARCH_ENDPOINT")
-index_name = os.getenv("AZURE_SEARCH_INDEX")
-cred = AzureCliCredential()
+credential = DefaultAzureCredential()
 
-client = SearchClient(endpoint=endpoint, index_name=index_name, credential=cred)
 
-# Fetch a few documents
-results = client.search("*", top=5)
-
-for doc in results:
-    print(doc.get("participants_user_displayName"))
+AZURE_CLIENT_ID=<clientId>
+AZURE_CLIENT_SECRET=<clientSecret>
+AZURE_TENANT_ID=<tenantId>
