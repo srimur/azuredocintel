@@ -1,3 +1,20 @@
+AZURE_SEARCH_ENDPOINT=https://your-search.search.windows.net
+AZURE_SEARCH_INDEX=teams-cdr-index
+AZURE_SEARCH_KEY=your-search-admin-key
+
+AZURE_OPENAI_API_KEY=your-openai-key
+AZURE_OPENAI_API_BASE=https://your-openai.openai.azure.com
+AZURE_OPENAI_API_VERSION=2024-03-01-preview
+AZURE_OPENAI_DEPLOYMENT=your-embedding-deployment
+
+AZURE_CLIENT_ID=...
+AZURE_CLIENT_SECRET=...
+AZURE_TENANT_ID=...
+
+
+
+
+
 import os
 import json
 from dotenv import load_dotenv
