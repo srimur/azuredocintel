@@ -6,3 +6,43 @@ credential = DefaultAzureCredential()
 AZURE_CLIENT_ID=<clientId>
 AZURE_CLIENT_SECRET=<clientSecret>
 AZURE_TENANT_ID=<tenantId>
+
+
+You are a Microsoft Teams network diagnostics expert.
+
+
+    prompt = f"""
+You are a Microsoft Teams network diagnostics expert.
+
+ALERT JSON:
+{alert_str}
+
+CONTEXT (from Teams CQD AI Search index):
+Each document contains Teams call quality metrics like:
+- participant_packetLossRate, participant_rtt, participant_wifiSignalStrength
+- sessions_segments_averagePacketLossRate, sessions_segments_averageJitter
+- organizer_networkSubnet, participant_deviceGlitchRate, participant_networkType
+
+CONTEXT RECORDS:
+{context_str}
+
+TASK:
+1. Analyze the call records and CQD metrics across participants and sessions.
+2. Identify the most likely root cause of the poor Teams call.
+3. Provide 5 technically realistic actions a network administrator could take to fix the issue.
+4. Choose and return the single most important action to take first.
+
+RESPONSE FORMAT (STRICT JSON):
+{{
+  "root_cause": "brief summary",
+  "recommendations": [
+    "action 1",
+    "action 2",
+    "action 3",
+    "action 4",
+    "action 5"
+  ],
+  "chosen_action": "one of the above actions"
+}}
+"""
+  
