@@ -1,36 +1,91 @@
+import os
+import json
+from dotenv import load_dotenv
 from azure.identity import DefaultAzureCredential
+from azure.search.documents import SearchClient
+from langchain_community.vectorstores.azuresearch import AzureSearch
+from langchain_openai import AzureOpenAIEmbeddings, ChatOpenAI
+from langgraph.graph import StateGraph, END
 
+# Load env
+load_dotenv()
+
+# Auth + config
 credential = DefaultAzureCredential()
+search_client = SearchClient(
+    endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+    index_name=os.getenv("AZURE_SEARCH_INDEX"),
+    credential=credential
+)
 
+embedding = AzureOpenAIEmbeddings(
+    azure_endpoint=os.getenv("AZURE_OPENAI_API_BASE"),
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION")
+)
 
-AZURE_CLIENT_ID=<clientId>
-AZURE_CLIENT_SECRET=<clientSecret>
-AZURE_TENANT_ID=<tenantId>
+vectorstore = AzureSearch(
+    azure_search_endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+    azure_search_key=os.getenv("AZURE_SEARCH_KEY"),
+    index_name=os.getenv("AZURE_SEARCH_INDEX"),
+    embedding_function=embedding
+)
 
+llm = ChatOpenAI(
+    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+    openai_api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    azure_endpoint=os.getenv("AZURE_OPENAI_API_BASE"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+    temperature=0
+)
 
-You are a Microsoft Teams network diagnostics expert.
+# -------- LangGraph Nodes -------- #
+def load_alert_node(state):
+    with open("alert.json") as f:
+        alert = json.load(f)
+    state["alert"] = alert
+    state["call_id"] = alert["call_id"]
+    state["user_id"] = alert["User"]["email"]
+    return state
 
+def fetch_call_node(state):
+    call_id = state["call_id"]
+    results = search_client.search(f"sessions_segments_callId:{call_id}", top=10)
+    state["call_docs"] = [doc for doc in results]
+    return state
+
+def fetch_user_context_node(state):
+    user_id = state["user_id"]
+    query = f"participants_user_displayName:{user_id} OR organizer_user_displayName:{user_id}"
+    results = search_client.search(query, top=5)
+    state["user_context_docs"] = [doc for doc in results]
+    return state
+
+def build_prompt_node(state):
+    alert = state["alert"]
+    current = state.get("call_docs", [])
+    history = state.get("user_context_docs", [])
 
     prompt = f"""
-You are a Microsoft Teams network diagnostics expert.
+You are a Microsoft Teams network engineer.
 
-ALERT JSON:
-{alert_str}
-
-CONTEXT (from Teams CQD AI Search index):
-Each document contains Teams call quality metrics like:
-- participant_packetLossRate, participant_rtt, participant_wifiSignalStrength
-- sessions_segments_averagePacketLossRate, sessions_segments_averageJitter
-- organizer_networkSubnet, participant_deviceGlitchRate, participant_networkType
-
-CONTEXT RECORDS:
-{context_str}
+An alert has been raised for a poor quality call.
 
 TASK:
-1. Analyze the call records and CQD metrics across participants and sessions.
+1. Analyze the call records and CDR metrics across participants and sessions.
 2. Identify the most likely root cause of the poor Teams call.
 3. Provide 5 technically realistic actions a network administrator could take to fix the issue.
 4. Choose and return the single most important action to take first.
+
+ALERT:
+{json.dumps(alert, indent=2)}
+
+CURRENT CALL DATA:
+{json.dumps(current, indent=2)}
+
+HISTORICAL USER CONTEXT (Previous calls for user {alert['User']['email']}):
+{json.dumps(history, indent=2)}
 
 RESPONSE FORMAT (STRICT JSON):
 {{
@@ -42,7 +97,44 @@ RESPONSE FORMAT (STRICT JSON):
     "action 4",
     "action 5"
   ],
-  "chosen_action": "one of the above actions"
+  "chosen_action": "one of the above"
 }}
 """
-  
+    state["final_prompt"] = prompt
+    return state
+
+def llm_analysis_node(state):
+    prompt = state["final_prompt"]
+    response = llm.predict(prompt)
+    try:
+        insights = json.loads(response)
+        state["insights"] = insights
+    except Exception as e:
+        state["insights"] = {"error": str(e), "raw": response}
+    return state
+
+def print_output_node(state):
+    print("✅ Final Output:\n", json.dumps(state["insights"], indent=2))
+    return state
+
+# -------- LangGraph Assembly -------- #
+graph = StateGraph()
+graph.add_node("load_alert", load_alert_node)
+graph.add_node("fetch_call", fetch_call_node)
+graph.add_node("fetch_user_context", fetch_user_context_node)
+graph.add_node("build_prompt", build_prompt_node)
+graph.add_node("llm_analysis", llm_analysis_node)
+graph.add_node("print_output", print_output_node)
+
+graph.set_entry_point("load_alert")
+graph.add_edge("load_alert", "fetch_call")
+graph.add_edge("fetch_call", "fetch_user_context")
+graph.add_edge("fetch_user_context", "build_prompt")
+graph.add_edge("build_prompt", "llm_analysis")
+graph.add_edge("llm_analysis", "print_output")
+graph.add_edge("print_output", END)
+
+app = graph.compile()
+
+# -------- Run Graph -------- #
+app.invoke({})
