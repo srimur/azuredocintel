@@ -1,0 +1,42 @@
+import os
+from dotenv import load_dotenv
+from azure.search.documents import SearchClient
+from azure.identity import DefaultAzureCredential
+import json
+
+# Load .env
+load_dotenv()
+
+# Auth
+credential = DefaultAzureCredential()
+
+# Setup search client
+search_client = SearchClient(
+    endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+    index_name=os.getenv("AZURE_SEARCH_INDEX"),
+    credential=credential
+)
+
+# Fetch one doc to inspect
+print("🔍 Fetching a sample document...\n")
+results = search_client.search(search_text="*", top=1)
+
+try:
+    doc = next(iter(results))  # get first result
+    print("✅ Raw Document:\n")
+    print(json.dumps(doc, indent=2))
+
+    # Optional: just extract useful fields
+    call_id = doc.get("sessions_segments_callId", "<not found>")
+    participant = doc.get("participants_user_displayName", "<not found>")
+    organizer = doc.get("organizer_user_displayName", "<not found>")
+
+    print("\n🧾 Sample Fields:")
+    print("Call ID:", call_id)
+    print("Participant Display Name:", participant)
+    print("Organizer Display Name:", organizer)
+
+except StopIteration:
+    print("❌ No documents found.")
+except Exception as e:
+    print("❌ Error:", e)
