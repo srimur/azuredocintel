@@ -6,6 +6,8 @@ This system analyzes poor quality Teams calls and provides remediation recommend
 import os
 import json
 import logging
+import time
+import random
 from typing import Dict, List, Any, TypedDict
 from dotenv import load_dotenv
 from azure.core.credentials import AzureKeyCredential
@@ -32,7 +34,71 @@ class GraphState(TypedDict):
     final_prompt: str
     insights: Dict[str, Any]
 
-def validate_env_variables() -> bool:
+def retry_with_exponential_backoff(
+    func,
+    max_retries: int = 3,
+    initial_delay: float = 1.0,
+    backoff_factor: float = 2.0,
+    max_delay: float = 60.0
+):
+    """Retry function with exponential backoff for rate limiting"""
+    def wrapper(*args, **kwargs):
+        delay = initial_delay
+        for attempt in range(max_retries + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                error_msg = str(e).lower()
+                
+                # Check if it's a rate limit error
+                if any(keyword in error_msg for keyword in ['rate limit', 'quota', 'throttle', '429']):
+                    if attempt < max_retries:
+                        # Add jitter to prevent thundering herd
+                        jitter = random.uniform(0, 0.1) * delay
+                        sleep_time = min(delay + jitter, max_delay)
+                        
+                        logger.warning(f"Rate limit hit, retrying in {sleep_time:.2f}s (attempt {attempt + 1}/{max_retries + 1})")
+                        time.sleep(sleep_time)
+                        delay *= backoff_factor
+                    else:
+                        logger.error(f"Rate limit exceeded after {max_retries} retries")
+                        raise
+                else:
+                    # Non-rate limit error, don't retry
+                    raise
+        
+        return func(*args, **kwargs)
+    return wrapper
+
+def truncate_data_for_token_limit(data: List[Dict], max_items: int = 3) -> List[Dict]:
+    """Truncate data to stay within token limits"""
+    if not data:
+        return []
+    
+    # Take only the most recent/relevant items
+    truncated = data[:max_items]
+    
+    # Further truncate each item to essential fields only
+    essential_fields = [
+        'call_id', 'user_id', 'timestamp', 'quality_metrics', 
+        'network_metrics', 'audio_quality', 'video_quality',
+        'packet_loss', 'latency', 'jitter', 'sessions_segments_callId',
+        'participants_user_displayName', 'organizer_user_displayName'
+    ]
+    
+    simplified_data = []
+    for item in truncated:
+        simplified_item = {}
+        for key, value in item.items():
+            if key in essential_fields:
+                # Truncate long string values
+                if isinstance(value, str) and len(value) > 100:
+                    simplified_item[key] = value[:100] + "..."
+                else:
+                    simplified_item[key] = value
+        simplified_data.append(simplified_item)
+    
+    return simplified_data
     """Validate all required environment variables are present"""
     required_vars = [
         "AZURE_SEARCH_ENDPOINT",
@@ -56,7 +122,7 @@ def validate_env_variables() -> bool:
     logger.info("✅ All environment variables validated")
     return True
 
-def create_azure_search_client() -> SearchClient:
+def validate_env_variables() -> bool:
     """Create Azure Search client with proper error handling"""
     try:
         search_credential = AzureKeyCredential(os.getenv("AZURE_SEARCH_KEY"))
@@ -72,16 +138,19 @@ def create_azure_search_client() -> SearchClient:
         raise
 
 def create_azure_openai_client() -> AzureChatOpenAI:
-    """Create Azure OpenAI client with proper error handling"""
+    """Create Azure OpenAI client with S0 tier optimizations"""
     try:
         client = AzureChatOpenAI(
             azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
             openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
             azure_endpoint=os.getenv("AZURE_OPENAI_API_BASE"),
             openai_api_key=os.getenv("AZURE_OPENAI_API_KEY"),
-            temperature=0
+            temperature=0,
+            max_tokens=1000,  # Limit tokens for S0 tier
+            request_timeout=30,  # Add timeout
+            max_retries=2  # Limit retries
         )
-        logger.info("✅ Azure OpenAI client created successfully")
+        logger.info("✅ Azure OpenAI client created successfully (S0 optimized)")
         return client
     except Exception as e:
         logger.error(f"❌ Failed to create Azure OpenAI client: {e}")
@@ -122,7 +191,7 @@ def load_alert_node(state: GraphState) -> GraphState:
         
         state["alert"] = alert
         state["call_id"] = alert.get("call_id", "")
-        state["user_id"] = alert.get("User", {}).get("email", "")
+        state["user_id"] = alert.get("user_id", "")
         
         logger.info(f"✅ Alert loaded - Call ID: {state['call_id']}, User: {state['user_id']}")
         
@@ -155,8 +224,8 @@ def fetch_call_node(state: GraphState) -> GraphState:
         
         results = search_client.search(
             search_text=search_query,
-            top=10,
-            select=["*"]
+            top=5,  # Reduced from 10 to limit tokens
+            select=["call_id", "timestamp", "quality_metrics", "network_metrics", "sessions_segments_callId"]
         )
         
         # Convert search results to serializable format
@@ -199,8 +268,8 @@ def fetch_user_context_node(state: GraphState) -> GraphState:
         
         results = search_client.search(
             search_text=search_query,
-            top=5,
-            select=["*"]
+            top=3,  # Reduced from 5 to limit tokens
+            select=["user_id", "displayName", "email", "timestamp", "participants_user_displayName", "organizer_user_displayName"]
         )
         
         # Convert search results to serializable format
@@ -228,49 +297,44 @@ def fetch_user_context_node(state: GraphState) -> GraphState:
     return state
 
 def build_prompt_node(state: GraphState) -> GraphState:
-    """Build the analysis prompt for the LLM"""
+    """Build the analysis prompt for the LLM with token optimization"""
     logger.info("📝 Building analysis prompt...")
     
     try:
         alert = state.get("alert", {})
         current = state.get("call_docs", [])
         history = state.get("user_context_docs", [])
-        user_email = alert.get("User", {}).get("email", "unknown")
         
-        prompt = f"""You are a Microsoft Teams network engineer analyzing a poor quality call.
+        # Truncate data to stay within token limits
+        current_truncated = truncate_data_for_token_limit(current, max_items=2)
+        history_truncated = truncate_data_for_token_limit(history, max_items=2)
+        
+        call_id = alert.get("call_id", "unknown")
+        user_id = alert.get("user_id", "unknown")
+        
+        # Optimized prompt for S0 tier - shorter and more focused
+        prompt = f"""Analyze Teams call quality issue.
 
-TASK:
-1. Analyze the call records and CDR metrics across participants and sessions
-2. Identify the most likely root cause of the poor Teams call quality
-3. Provide 5 technically realistic actions a network administrator could take to fix the issue
-4. Choose and return the single most important action to take first
+Call ID: {call_id}
+User ID: {user_id}
 
-ALERT DATA:
-{json.dumps(alert, indent=2)}
+Current Call Data:
+{json.dumps(current_truncated, indent=1)}
 
-CURRENT CALL DATA ({len(current)} documents):
-{json.dumps(current, indent=2)}
+User History:
+{json.dumps(history_truncated, indent=1)}
 
-HISTORICAL USER CONTEXT ({len(history)} documents for {user_email}):
-{json.dumps(history, indent=2)}
-
-RESPONSE FORMAT (MUST BE VALID JSON):
+Provide analysis in JSON format:
 {{
-  "root_cause": "Brief technical summary of the root cause",
-  "recommendations": [
-    "Specific action 1",
-    "Specific action 2", 
-    "Specific action 3",
-    "Specific action 4",
-    "Specific action 5"
-  ],
-  "chosen_action": "The most critical action from the recommendations list"
+  "root_cause": "brief cause",
+  "recommendations": ["action1", "action2", "action3"],
+  "chosen_action": "most critical action"
 }}
 
-Important: Respond ONLY with the JSON object, no additional text."""
+Response must be valid JSON only."""
 
         state["final_prompt"] = prompt
-        logger.info("✅ Analysis prompt built successfully")
+        logger.info("✅ Optimized analysis prompt built")
         
     except Exception as e:
         logger.error(f"❌ Error building prompt: {e}")
@@ -279,7 +343,7 @@ Important: Respond ONLY with the JSON object, no additional text."""
     return state
 
 def llm_analysis_node(state: GraphState) -> GraphState:
-    """Analyze the data using Azure OpenAI"""
+    """Analyze the data using Azure OpenAI with rate limiting"""
     logger.info("🤖 Running LLM analysis...")
     
     try:
@@ -289,10 +353,17 @@ def llm_analysis_node(state: GraphState) -> GraphState:
             state["insights"] = {"error": "No prompt available"}
             return state
         
+        # Add throttling delay for S0 tier
+        time.sleep(2)  # 2-second delay to avoid rate limits
+        
         llm = create_azure_openai_client()
         
-        # Use invoke method for chat models
-        response = llm.invoke(prompt)
+        # Wrap the LLM call with retry logic
+        @retry_with_exponential_backoff
+        def make_llm_call():
+            return llm.invoke(prompt)
+        
+        response = make_llm_call()
         
         # Extract content from response
         if hasattr(response, 'content'):
@@ -302,23 +373,55 @@ def llm_analysis_node(state: GraphState) -> GraphState:
         
         logger.info("✅ LLM response received")
         
-        # Parse JSON response
+        # Parse JSON response with better error handling
         try:
-            insights = json.loads(response_text.strip())
+            # Clean the response text
+            response_text = response_text.strip()
+            if response_text.startswith('```json'):
+                response_text = response_text[7:-3]
+            elif response_text.startswith('```'):
+                response_text = response_text[3:-3]
+            
+            insights = json.loads(response_text)
+            
+            # Validate the response structure
+            if not all(key in insights for key in ['root_cause', 'recommendations', 'chosen_action']):
+                logger.warning("⚠️ LLM response missing required fields")
+                insights = {
+                    "root_cause": insights.get('root_cause', 'Unable to determine'),
+                    "recommendations": insights.get('recommendations', ['No recommendations available']),
+                    "chosen_action": insights.get('chosen_action', 'No action specified')
+                }
+            
             state["insights"] = insights
             logger.info("✅ LLM response parsed successfully")
+            
         except json.JSONDecodeError as e:
             logger.error(f"❌ Failed to parse LLM response as JSON: {e}")
+            # Create a fallback response
             state["insights"] = {
+                "root_cause": "Unable to parse LLM response",
+                "recommendations": [
+                    "Check network connectivity",
+                    "Verify audio/video devices",
+                    "Update Teams client"
+                ],
+                "chosen_action": "Check network connectivity",
                 "error": f"JSON parsing failed: {str(e)}",
-                "raw_response": response_text
+                "raw_response": response_text[:200] + "..." if len(response_text) > 200 else response_text
             }
             
     except Exception as e:
         logger.error(f"❌ Error in LLM analysis: {e}")
         state["insights"] = {
-            "error": f"LLM analysis failed: {str(e)}",
-            "raw_response": ""
+            "root_cause": "Analysis failed due to system error",
+            "recommendations": [
+                "Check system logs",
+                "Verify Azure connectivity",
+                "Contact system administrator"
+            ],
+            "chosen_action": "Check system logs",
+            "error": f"LLM analysis failed: {str(e)}"
         }
     
     return state
@@ -383,30 +486,16 @@ def create_workflow_graph() -> StateGraph:
     return graph
 
 def create_sample_alert_file():
-    """Create a sample alert.json file for testing"""
+    """Create a simplified sample alert.json file for testing"""
     sample_alert = {
         "call_id": "sample_call_123",
-        "timestamp": "2024-01-15T10:30:00Z",
-        "User": {
-            "email": "user@company.com",
-            "displayName": "John Doe"
-        },
-        "quality_metrics": {
-            "audio_quality": "poor",
-            "video_quality": "fair",
-            "overall_rating": 2
-        },
-        "network_metrics": {
-            "packet_loss": 0.05,
-            "latency": 150,
-            "jitter": 30
-        }
+        "user_id": "user@company.com"
     }
     
     with open("alert.json", "w", encoding="utf-8") as f:
         json.dump(sample_alert, f, indent=2)
     
-    logger.info("✅ Sample alert.json file created")
+    logger.info("✅ Simplified sample alert.json file created")
 
 def main():
     """Main execution function"""
