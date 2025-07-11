@@ -80,9 +80,9 @@ def truncate_data_for_token_limit(data: List[Dict], max_items: int = 3) -> List[
     
     # Further truncate each item to essential fields only
     essential_fields = [
-        'call_id', 'user_id', 'timestamp', 'quality_metrics', 
+        'id', 'user_id', 'timestamp', 'quality_metrics', 
         'network_metrics', 'audio_quality', 'video_quality',
-        'packet_loss', 'latency', 'jitter', 'sessions_segments_callId',
+        'packet_loss', 'latency', 'jitter', 'displayName',
         'participants_user_displayName', 'organizer_user_displayName'
     ]
     
@@ -222,12 +222,13 @@ def fetch_call_node(state: GraphState) -> GraphState:
             return state
         
         search_client = create_azure_search_client()
-        search_query = f"sessions_segments_callId:{call_id}"
+        # Use 'id' field from Azure Search index, not 'call_id'
+        search_query = f"id:{call_id}"
         
         results = search_client.search(
             search_text=search_query,
             top=5,  # Reduced from 10 to limit tokens
-            select=["call_id", "timestamp", "quality_metrics", "network_metrics", "sessions_segments_callId"]
+            select=["id", "timestamp", "quality_metrics", "network_metrics", "participants_user_displayName", "organizer_user_displayName"]
         )
         
         # Convert search results to serializable format
@@ -266,12 +267,13 @@ def fetch_user_context_node(state: GraphState) -> GraphState:
             return state
         
         search_client = create_azure_search_client()
-        search_query = f"participants_user_displayName:{user_id} OR organizer_user_displayName:{user_id}"
+        # Search for user in both participant and organizer fields using displayName
+        search_query = f"participants_user_displayName:\"{user_id}\" OR organizer_user_displayName:\"{user_id}\""
         
         results = search_client.search(
             search_text=search_query,
             top=3,  # Reduced from 5 to limit tokens
-            select=["user_id", "displayName", "email", "timestamp", "participants_user_displayName", "organizer_user_displayName"]
+            select=["id", "displayName", "timestamp", "participants_user_displayName", "organizer_user_displayName", "quality_metrics"]
         )
         
         # Convert search results to serializable format
@@ -490,14 +492,17 @@ def create_workflow_graph() -> StateGraph:
 def create_sample_alert_file():
     """Create a simplified sample alert.json file for testing"""
     sample_alert = {
-        "call_id": "sample_call_123",
-        "user_id": "user@company.com"
+        "call_id": "PLACEHOLDER_ID_FROM_AZURE_SEARCH",
+        "user_id": "PLACEHOLDER_DISPLAY_NAME"
     }
     
     with open("alert.json", "w", encoding="utf-8") as f:
         json.dump(sample_alert, f, indent=2)
     
-    logger.info("✅ Simplified sample alert.json file created")
+    logger.info("✅ Sample alert.json file created with placeholders")
+    logger.info("📝 Please update alert.json with:")
+    logger.info("   - call_id: actual 'id' value from your Azure Search CQD index")
+    logger.info("   - user_id: actual display name of a participant")
 
 def main():
     """Main execution function"""
