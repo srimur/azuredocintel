@@ -99,6 +99,8 @@ def truncate_data_for_token_limit(data: List[Dict], max_items: int = 3) -> List[
         simplified_data.append(simplified_item)
     
     return simplified_data
+
+def validate_env_variables() -> bool:
     """Validate all required environment variables are present"""
     required_vars = [
         "AZURE_SEARCH_ENDPOINT",
@@ -122,7 +124,7 @@ def truncate_data_for_token_limit(data: List[Dict], max_items: int = 3) -> List[
     logger.info("✅ All environment variables validated")
     return True
 
-def validate_env_variables() -> bool:
+def create_azure_search_client() -> SearchClient:
     """Create Azure Search client with proper error handling"""
     try:
         search_credential = AzureKeyCredential(os.getenv("AZURE_SEARCH_KEY"))
