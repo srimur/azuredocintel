@@ -1,0 +1,276 @@
+import os
+import json
+from dotenv import load_dotenv
+from azure.identity import DefaultAzureCredential
+from azure.core.credentials import AzureKeyCredential
+from azure.search.documents import SearchClient
+from langchain_community.vectorstores.azuresearch import AzureSearch
+from langchain_openai import AzureOpenAIEmbeddings, ChatOpenAI
+from langgraph.graph import StateGraph, END
+
+# Load env
+load_dotenv()
+
+# Auth + config - Use AzureKeyCredential for search
+search_credential = AzureKeyCredential(os.getenv("AZURE_SEARCH_KEY"))
+search_client = SearchClient(
+    endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+    index_name=os.getenv("AZURE_SEARCH_INDEX"),
+    credential=search_credential
+)
+
+embedding = AzureOpenAIEmbeddings(
+    azure_endpoint=os.getenv("AZURE_OPENAI_API_BASE"),
+    api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION")
+)
+
+vectorstore = AzureSearch(
+    azure_search_endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+    azure_search_key=os.getenv("AZURE_SEARCH_KEY"),
+    index_name=os.getenv("AZURE_SEARCH_INDEX"),
+    embedding_function=embedding
+)
+
+llm = ChatOpenAI(
+    azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+    openai_api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+    azure_endpoint=os.getenv("AZURE_OPENAI_API_BASE"),
+    api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+    temperature=0
+)
+
+# -------- LangGraph Nodes -------- #
+def load_alert_node(state):
+    import json
+    import os
+    
+    try:
+        with open("alert.json") as f:
+            alert = json.load(f)
+        state["alert"] = alert
+        state["call_id"] = alert["call_id"]
+        state["user_id"] = alert["User"]["email"]
+        print(f"✅ Alert loaded for call_id: {state['call_id']}")
+    except Exception as e:
+        print(f"❌ Error loading alert: {e}")
+        state["alert"] = {}
+        state["call_id"] = None
+        state["user_id"] = None
+    
+    return state
+
+def fetch_call_node(state):
+    import os
+    from azure.core.credentials import AzureKeyCredential
+    from azure.search.documents import SearchClient
+    
+    try:
+        call_id = state["call_id"]
+        if not call_id:
+            print("❌ No call_id available")
+            state["call_docs"] = []
+            return state
+            
+        # Reinitialize search client in node to prevent shutdown issues
+        search_credential = AzureKeyCredential(os.getenv("AZURE_SEARCH_KEY"))
+        search_client = SearchClient(
+            endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+            index_name=os.getenv("AZURE_SEARCH_INDEX"),
+            credential=search_credential
+        )
+        
+        results = search_client.search(f"sessions_segments_callId:{call_id}", top=10)
+        state["call_docs"] = [doc for doc in results]
+        print(f"✅ Found {len(state['call_docs'])} call documents")
+    except Exception as e:
+        print(f"❌ Error fetching call data: {e}")
+        state["call_docs"] = []
+    
+    return state
+
+def fetch_user_context_node(state):
+    import os
+    from azure.core.credentials import AzureKeyCredential
+    from azure.search.documents import SearchClient
+    
+    try:
+        user_id = state["user_id"]
+        if not user_id:
+            print("❌ No user_id available")
+            state["user_context_docs"] = []
+            return state
+            
+        # Reinitialize search client in node to prevent shutdown issues
+        search_credential = AzureKeyCredential(os.getenv("AZURE_SEARCH_KEY"))
+        search_client = SearchClient(
+            endpoint=os.getenv("AZURE_SEARCH_ENDPOINT"),
+            index_name=os.getenv("AZURE_SEARCH_INDEX"),
+            credential=search_credential
+        )
+        
+        query = f"participants_user_displayName:{user_id} OR organizer_user_displayName:{user_id}"
+        results = search_client.search(query, top=5)
+        state["user_context_docs"] = [doc for doc in results]
+        print(f"✅ Found {len(state['user_context_docs'])} user context documents")
+    except Exception as e:
+        print(f"❌ Error fetching user context: {e}")
+        state["user_context_docs"] = []
+    
+    return state
+
+def build_prompt_node(state):
+    import json
+    
+    try:
+        alert = state.get("alert", {})
+        current = state.get("call_docs", [])
+        history = state.get("user_context_docs", [])
+        
+        # Convert search results to serializable format
+        current_serializable = []
+        for doc in current:
+            if hasattr(doc, '__dict__'):
+                current_serializable.append(dict(doc))
+            else:
+                current_serializable.append(doc)
+        
+        history_serializable = []
+        for doc in history:
+            if hasattr(doc, '__dict__'):
+                history_serializable.append(dict(doc))
+            else:
+                history_serializable.append(doc)
+
+        prompt = f"""
+You are a Microsoft Teams network engineer.
+
+An alert has been raised for a poor quality call.
+
+TASK:
+1. Analyze the call records and CDR metrics across participants and sessions.
+2. Identify the most likely root cause of the poor Teams call.
+3. Provide 5 technically realistic actions a network administrator could take to fix the issue.
+4. Choose and return the single most important action to take first.
+
+ALERT:
+{json.dumps(alert, indent=2)}
+
+CURRENT CALL DATA:
+{json.dumps(current_serializable, indent=2)}
+
+HISTORICAL USER CONTEXT (Previous calls for user {alert.get('User', {}).get('email', 'unknown')}):
+{json.dumps(history_serializable, indent=2)}
+
+RESPONSE FORMAT (STRICT JSON):
+{{
+  "root_cause": "brief summary",
+  "recommendations": [
+    "action 1",
+    "action 2",
+    "action 3",
+    "action 4",
+    "action 5"
+  ],
+  "chosen_action": "one of the above"
+}}
+"""
+        state["final_prompt"] = prompt
+        print("✅ Prompt built successfully")
+    except Exception as e:
+        print(f"❌ Error building prompt: {e}")
+        state["final_prompt"] = "Error building prompt"
+    
+    return state
+
+def llm_analysis_node(state):
+    import json
+    import os
+    from langchain_openai import ChatOpenAI
+    
+    try:
+        prompt = state["final_prompt"]
+        
+        # Reinitialize LLM in node to prevent shutdown issues
+        llm = ChatOpenAI(
+            azure_deployment=os.getenv("AZURE_OPENAI_DEPLOYMENT"),
+            openai_api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+            azure_endpoint=os.getenv("AZURE_OPENAI_API_BASE"),
+            api_version=os.getenv("AZURE_OPENAI_API_VERSION"),
+            temperature=0
+        )
+        
+        response = llm.predict(prompt)
+        print("✅ LLM response received")
+        
+        try:
+            insights = json.loads(response)
+            state["insights"] = insights
+        except json.JSONDecodeError as e:
+            print(f"❌ JSON decode error: {e}")
+            state["insights"] = {
+                "error": f"JSON decode error: {str(e)}", 
+                "raw_response": response
+            }
+    except Exception as e:
+        print(f"❌ Error in LLM analysis: {e}")
+        state["insights"] = {"error": str(e), "raw_response": ""}
+    
+    return state
+
+def print_output_node(state):
+    import json
+    
+    print("\n" + "="*50)
+    print("✅ FINAL OUTPUT:")
+    print("="*50)
+    insights = state.get("insights", {})
+    print(json.dumps(insights, indent=2))
+    print("="*50)
+    
+    return state
+
+# -------- LangGraph Assembly -------- #
+def create_graph():
+    """Create and compile the LangGraph"""
+    from langgraph.graph import StateGraph, END
+    
+    graph = StateGraph(dict)
+    
+    # Add nodes
+    graph.add_node("load_alert", load_alert_node)
+    graph.add_node("fetch_call", fetch_call_node)
+    graph.add_node("fetch_user_context", fetch_user_context_node)
+    graph.add_node("build_prompt", build_prompt_node)
+    graph.add_node("llm_analysis", llm_analysis_node)
+    graph.add_node("print_output", print_output_node)
+    
+    # Set entry point
+    graph.set_entry_point("load_alert")
+    
+    # Add edges
+    graph.add_edge("load_alert", "fetch_call")
+    graph.add_edge("fetch_call", "fetch_user_context")
+    graph.add_edge("fetch_user_context", "build_prompt")
+    graph.add_edge("build_prompt", "llm_analysis")
+    graph.add_edge("llm_analysis", "print_output")
+    graph.add_edge("print_output", END)
+    
+    return graph.compile()
+
+# -------- Main Execution -------- #
+def main():
+    """Main execution function"""
+    try:
+        print("🚀 Starting Teams Call Analysis...")
+        app = create_graph()
+        result = app.invoke({})
+        print("✅ Analysis completed successfully!")
+        return result
+    except Exception as e:
+        print(f"❌ Error in main execution: {e}")
+        return None
+
+if __name__ == "__main__":
+    main()
