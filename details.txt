@@ -1,0 +1,9 @@
+alert just consists of the call_id and the display name of the user facing problem. 
+
+fetch_call: retrieves call data for the current alert’s call_id
+
+fetch_user_context: retrieves past call context for the user (displayName)
+
+build_prompt: constructs a detailed prompt with alert + metrics
+
+run_llm: openai to analyze the issue and recommend 5 actions, choosing only one most likely one
