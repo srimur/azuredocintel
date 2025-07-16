@@ -1,0 +1,9 @@
+Deploy lightweight agents on each user’s device and at key network nodes to continuously track packet loss, latency, jitter, and media‑stream health.
+
+Detect anomalies in real time using built‑in thresholds (e.g., packet loss >2 %, latency >150 ms).
+
+Trigger automated fixes at the edge—such as rerouting traffic over a secondary path, restarting the network interface, or adjusting codec settings—without waiting for central intervention.
+
+Notify the user instantly via an in‑app alert (or email/SMS) that a remediation step was taken and the connection is restoring.
+
+Log all events and outcomes to a central system so support teams can review trends, escalate unresolved issues, and continuously refine anomaly thresholds.
